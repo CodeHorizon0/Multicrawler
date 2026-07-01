@@ -7,7 +7,6 @@ MultiCrawler combines a high-performance HTTP client with browser automation to 
 ## Features
 
 ### Networking
-
 - HTTP/1.1, HTTP/2 and HTTP/3 support
 - Automatic protocol selection
 - Persistent connection pooling
