@@ -93,8 +93,14 @@ class Database:
         assert self.conn is not None
         cur = await self.conn.execute(
             """
-            INSERT OR IGNORE INTO frontier(url, depth, referrer, status, retries, last_error, protocol_hint)
+            INSERT INTO frontier(url, depth, referrer, status, retries, last_error, protocol_hint)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                status=excluded.status,
+                retries=excluded.retries,
+                last_error=excluded.last_error,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE frontier.status != 'done'
             """,
             (item.url, item.depth, item.referrer, item.status, item.retries, item.last_error, item.protocol_hint),
         )

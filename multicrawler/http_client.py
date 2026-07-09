@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import monotonic
+import asyncio
 
 import httpx
 
@@ -50,6 +51,7 @@ class HttpProbe:
 class HttpClient:
     def __init__(self, timeout: float) -> None:
         self.timeout = timeout
+        self.max_retries = 3
         self._client: httpx.AsyncClient | None = None
         self._profile = pick_profile()
 
@@ -90,29 +92,46 @@ class HttpClient:
         }
 
     async def request(self, url: str) -> HttpProbe:
-        started = monotonic()
-        response = await self.client.get(url, headers=self.default_headers())
-        elapsed = monotonic() - started
-        http_version = getattr(response, "http_version", None)
-        content_type = response.headers.get("content-type")
-        alt_svc_header = response.headers.get("alt-svc", "")
-        alt_svc_h3 = "h3" in alt_svc_header.lower() or "quic" in alt_svc_header.lower()
-        try:
-            body = response.text
-        except Exception:
-            encoding = response.encoding or "utf-8"
-            body = response.content.decode(encoding, errors="ignore")
-        return HttpProbe(
-            status_code=response.status_code,
-            http_version=http_version,
-            alt_svc_h3=alt_svc_h3,
-            content_type=content_type,
-            body=body,
-            raw_bytes=len(response.content),
-            elapsed=elapsed,
-            final_url=str(response.url),
-            user_agent=self.default_headers()["User-Agent"],
-        )
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            started = monotonic()
+            try:
+                response = await self.client.get(url, headers=self.default_headers())
+                retry_status = response.status_code == 429 or response.status_code >= 500
+                if retry_status and attempt < self.max_retries - 1:
+                    retry_after = response.headers.get("retry-after")
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt
+                    await asyncio.sleep(min(delay, 15))
+                    continue
+
+                elapsed = monotonic() - started
+                http_version = getattr(response, "http_version", None)
+                content_type = response.headers.get("content-type")
+                alt_svc_header = response.headers.get("alt-svc", "")
+                alt_svc_h3 = "h3" in alt_svc_header.lower() or "quic" in alt_svc_header.lower()
+                try:
+                    body = response.text
+                except Exception:
+                    encoding = response.encoding or "utf-8"
+                    body = response.content.decode(encoding, errors="ignore")
+                return HttpProbe(
+                    status_code=response.status_code,
+                    http_version=http_version,
+                    alt_svc_h3=alt_svc_h3,
+                    content_type=content_type,
+                    body=body,
+                    raw_bytes=len(response.content),
+                    elapsed=elapsed,
+                    final_url=str(response.url),
+                    user_agent=self.default_headers()["User-Agent"],
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = exc
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("request failed")
 
     async def probe(self, url: str) -> HttpProbe:
         return await self.request(url)

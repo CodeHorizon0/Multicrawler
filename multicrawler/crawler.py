@@ -217,6 +217,30 @@ class Crawler:
                 browser_required = bool(policy.get("browser_required", 0))
 
             probe = await self.http_client.request(url)
+
+            if probe.status_code in {204, 304}:
+                await self.db.mark_visited(url, domain, "empty_response", http_version=probe.http_version)
+                await self.db.mark_frontier_done(url, "done")
+                return
+
+            if probe.status_code == 404:
+                await self.db.mark_visited(url, domain, "not_found", http_version=probe.http_version)
+                await self.db.mark_frontier_done(url, "not_found")
+                return
+
+            if probe.status_code in {401, 403}:
+                await self.db.mark_visited(url, domain, "access_denied", http_version=probe.http_version)
+                await self.db.mark_frontier_done(url, "access_denied")
+                return
+
+            if probe.status_code >= 500 or probe.status_code == 429:
+                raise RuntimeError(f"temporary http status: {probe.status_code}")
+
+            if probe.status_code >= 400:
+                await self.db.mark_visited(url, domain, f"http_{probe.status_code}", http_version=probe.http_version)
+                await self.db.mark_frontier_done(url, f"http_{probe.status_code}")
+                return
+
             alt_svc_h3 = probe.alt_svc_h3
             decision = await self.transport_selector.decide(probe, browser_protocol_hint, alt_svc_h3)
 
