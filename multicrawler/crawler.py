@@ -65,6 +65,7 @@ class Crawler:
         self._signal_count = 0
         self._main_task: asyncio.Task[object] | None = None
         self._managed_tasks: list[asyncio.Task[object]] = []
+        self._pages_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         ensure_dir(self.config.data_dir)
@@ -168,8 +169,9 @@ class Crawler:
             if self.shutdown_event.is_set() and self.queue.empty():
                 return
 
-            if self.pages_seen >= self.config.max_pages:
-                self.shutdown_event.set()
+            async with self._pages_lock:
+                if self.pages_seen >= self.config.max_pages:
+                    self.shutdown_event.set()
 
             try:
                 item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
@@ -206,6 +208,7 @@ class Crawler:
             return
 
         await self.global_limiter.acquire()
+        limiter_acquired = True
         started = monotonic()
         body = ""
         try:
@@ -289,7 +292,10 @@ class Crawler:
                             await self.queue.put(child)
                             queued_now += 1
 
-            self.pages_seen += 1
+            async with self._pages_lock:
+                self.pages_seen += 1
+                if self.pages_seen >= self.config.max_pages:
+                    self.shutdown_event.set()
 
         except asyncio.CancelledError:
             raise
@@ -304,7 +310,8 @@ class Crawler:
             else:
                 await self.db.mark_frontier_done(url, "failed", str(exc))
         finally:
-            await self.global_limiter.release()
+            if limiter_acquired:
+                await self.global_limiter.release()
             ended = monotonic()
             self.controller.add_sample(
                 Sample(started=started, finished=ended, bytes_count=len(body.encode("utf-8", errors="ignore")))
